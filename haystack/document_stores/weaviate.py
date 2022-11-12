@@ -23,6 +23,7 @@ from haystack.document_stores.base import get_batches_from_generator
 from haystack.document_stores.filter_utils import LogicalFilterClause
 from haystack.document_stores.utils import convert_date_to_rfc3339
 from haystack.errors import DocumentStoreError
+from haystack.nodes.retriever import DenseRetriever
 
 
 logger = logging.getLogger(__name__)
@@ -61,8 +62,8 @@ class WeaviateDocumentStore(BaseDocumentStore):
         host: Union[str, List[str]] = "http://localhost",
         port: Union[int, List[int]] = 8080,
         timeout_config: tuple = (5, 15),
-        username: str = None,
-        password: str = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
         index: str = "Document",
         embedding_dim: int = 768,
         content_field: str = "content",
@@ -94,7 +95,7 @@ class WeaviateDocumentStore(BaseDocumentStore):
                            Currently, HSNW is only supported.
                            See: https://weaviate.io/developers/weaviate/current/more-resources/performance.html
         :param custom_schema: Allows to create custom schema in Weaviate, for more details
-                           See https://weaviate.io/developers/weaviate/current/data-schema/schema-configuration.html
+                           See https://weaviate.io/developers/weaviate/current/schema/schema-configuration.html
         :param module_name: Vectorization module to convert data into vectors. Default is "text2vec-trasnformers"
                             For more details, See https://weaviate.io/developers/weaviate/current/modules/
         :param return_embedding: To return document embedding.
@@ -313,7 +314,7 @@ class WeaviateDocumentStore(BaseDocumentStore):
         try:
             result = self.weaviate_client.data_object.get_by_id(id, with_vector=True)
         except weaviate.exceptions.UnexpectedStatusCodeException as usce:
-            logging.debug(f"Weaviate could not get the document requested: {usce}")
+            logging.debug("Weaviate could not get the document requested: %s", usce)
         if result:
             document = self._convert_weaviate_result_to_document(result, return_embedding=True)
         return document
@@ -340,7 +341,7 @@ class WeaviateDocumentStore(BaseDocumentStore):
             try:
                 result = self.weaviate_client.data_object.get_by_id(id, with_vector=True)
             except weaviate.exceptions.UnexpectedStatusCodeException as usce:
-                logging.debug(f"Weaviate could not get the document requested: {usce}")
+                logging.debug("Weaviate could not get the document requested: %s", usce)
             if result:
                 document = self._convert_weaviate_result_to_document(result, return_embedding=True)
                 documents.append(document)
@@ -560,11 +561,13 @@ class WeaviateDocumentStore(BaseDocumentStore):
                             and "error" in result["result"]["errors"]
                         ):
                             for message in result["result"]["errors"]["error"]:
-                                logger.error(f"{message['message']}")
+                                logger.error(message["message"])
                 progress_bar.update(batch_size)
         progress_bar.close()
 
-    def update_document_meta(self, id: str, meta: Dict[str, Union[List, str, int, float, bool]], index: str = None):
+    def update_document_meta(
+        self, id: str, meta: Dict[str, Union[List, str, int, float, bool]], index: Optional[str] = None
+    ):
         """
         Update the metadata dictionary of a document by specifying its string id.
         Overwrites only the specified fields, the unspecified ones remain unchanged.
@@ -1166,7 +1169,7 @@ class WeaviateDocumentStore(BaseDocumentStore):
 
     def update_embeddings(
         self,
-        retriever,
+        retriever: DenseRetriever,
         index: Optional[str] = None,
         filters: Optional[Dict[str, Union[Dict, List, str, int, float, bool]]] = None,
         update_existing_embeddings: bool = True,
@@ -1215,7 +1218,10 @@ class WeaviateDocumentStore(BaseDocumentStore):
             raise RuntimeError("Specify the arg `embedding_field` when initializing WeaviateDocumentStore()")
 
         if update_existing_embeddings:
-            logger.info(f"Updating embeddings for all {self.get_document_count(index=index)} docs ...")
+            logger.info(
+                "Updating embeddings for all %s docs ...",
+                self.get_document_count(index=index) if logger.level > logging.DEBUG else 0,
+            )
         else:
             raise RuntimeError(
                 "All the documents in Weaviate store have an embedding by default. Only update is allowed!"
@@ -1227,19 +1233,16 @@ class WeaviateDocumentStore(BaseDocumentStore):
             document_batch = [
                 self._convert_weaviate_result_to_document(hit, return_embedding=False) for hit in result_batch
             ]
-            embeddings = retriever.embed_documents(document_batch)  # type: ignore
-            assert len(document_batch) == len(embeddings)
+            embeddings = retriever.embed_documents(document_batch)
+            self._validate_embeddings_shape(
+                embeddings=embeddings, num_documents=len(document_batch), embedding_dim=self.embedding_dim
+            )
 
-            if embeddings[0].shape[0] != self.embedding_dim:
-                raise RuntimeError(
-                    f"Embedding dim. of model ({embeddings[0].shape[0]})"
-                    f" doesn't match embedding dim. in DocumentStore ({self.embedding_dim})."
-                    "Specify the arg `embedding_dim` when initializing WeaviateDocumentStore()"
-                )
+            if self.similarity == "cosine":
+                self.normalize_embedding(embeddings)
+
             for doc, emb in zip(document_batch, embeddings):
                 # Using update method to only update the embeddings, other properties will be in tact
-                if self.similarity == "cosine":
-                    self.normalize_embedding(emb)
                 self.weaviate_client.data_object.update({}, class_name=index, uuid=doc.id, vector=emb)
 
     def delete_all_documents(
@@ -1377,7 +1380,7 @@ class WeaviateDocumentStore(BaseDocumentStore):
         index = self._sanitize_index_name(index) or index
         if any(c for c in self.weaviate_client.schema.get()["classes"] if c["class"] == index):
             self.weaviate_client.schema.delete_class(index)
-            logger.info(f"Index '{index}' deleted.")
+            logger.info("Index '%s' deleted.", index)
 
     def delete_labels(self):
         """

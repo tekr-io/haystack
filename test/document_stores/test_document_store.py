@@ -1,37 +1,29 @@
-import logging
+from copy import deepcopy
+import math
 import sys
-from typing import List
 from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 import pytest
-import json
-import responses
-from responses import matchers
 from unittest.mock import Mock
-from elasticsearch import Elasticsearch
-from elasticsearch.exceptions import RequestError
 
-from ..conftest import (
-    deepset_cloud_fixture,
-    get_document_store,
-    MOCK_DC,
-    DC_API_ENDPOINT,
-    DC_API_KEY,
-    DC_TEST_INDEX,
-    SAMPLES_PATH,
+
+from ..conftest import get_document_store, ensure_ids_are_correct_uuids
+from haystack.document_stores import (
+    WeaviateDocumentStore,
+    MilvusDocumentStore,
+    FAISSDocumentStore,
+    ElasticsearchDocumentStore,
+    OpenSearchDocumentStore,
 )
-from haystack.document_stores import WeaviateDocumentStore, DeepsetCloudDocumentStore, InMemoryDocumentStore
+
 from haystack.document_stores.base import BaseDocumentStore
 from haystack.document_stores.es_converter import elasticsearch_index_to_document_store
 from haystack.errors import DuplicateDocumentError
 from haystack.schema import Document, Label, Answer, Span
-from haystack.document_stores.elasticsearch import ElasticsearchDocumentStore
-from haystack.document_stores.faiss import FAISSDocumentStore
 from haystack.nodes import EmbeddingRetriever, PreProcessor
 from haystack.pipelines import DocumentSearchPipeline
-from haystack.utils import DeepsetCloudError
 
 
 DOCUMENTS = [
@@ -66,57 +58,6 @@ DOCUMENTS = [
         "embedding": np.random.rand(768).astype(np.float64),
     },
 ]
-
-
-@pytest.mark.elasticsearch
-def test_init_elastic_client():
-    # defaults
-    _ = ElasticsearchDocumentStore()
-
-    # list of hosts + single port
-    _ = ElasticsearchDocumentStore(host=["localhost", "127.0.0.1"], port=9200)
-
-    # list of hosts + list of ports (wrong)
-    with pytest.raises(Exception):
-        _ = ElasticsearchDocumentStore(host=["localhost", "127.0.0.1"], port=[9200])
-
-    # list of hosts + list
-    _ = ElasticsearchDocumentStore(host=["localhost", "127.0.0.1"], port=[9200, 9200])
-
-    # only api_key
-    with pytest.raises(Exception):
-        _ = ElasticsearchDocumentStore(host=["localhost"], port=[9200], api_key="test")
-
-    # api_key +  id
-    _ = ElasticsearchDocumentStore(host=["localhost"], port=[9200], api_key="test", api_key_id="test")
-
-
-@pytest.mark.elasticsearch
-def test_init_elastic_doc_store_with_index_recreation():
-    index_name = "test_index_recreation"
-    label_index_name = "test_index_recreation_labels"
-
-    document_store = ElasticsearchDocumentStore(index=index_name, label_index=label_index_name)
-    documents = [Document(content="Doc1")]
-    labels = [
-        Label(
-            query="query",
-            document=documents[0],
-            is_correct_document=True,
-            is_correct_answer=False,
-            origin="user-feedback",
-            answer=None,
-        )
-    ]
-    document_store.write_documents(documents, index=index_name)
-    document_store.write_labels(labels, index=label_index_name)
-
-    document_store = ElasticsearchDocumentStore(index=index_name, label_index=label_index_name, recreate_index=True)
-    docs = document_store.get_all_documents(index=index_name)
-    labels = document_store.get_all_labels(index=label_index_name)
-
-    assert len(docs) == 0
-    assert len(labels) == 0
 
 
 def test_write_with_duplicate_doc_ids(document_store: BaseDocumentStore):
@@ -182,43 +123,28 @@ def test_get_all_documents_large_quantities(document_store: BaseDocumentStore):
 
 def test_get_all_document_filter_duplicate_text_value(document_store: BaseDocumentStore):
     documents = [
-        Document(content="Doc1", meta={"f1": "0"}, id_hash_keys=["meta"]),
-        Document(content="Doc1", meta={"f1": "1", "meta_id": "0"}, id_hash_keys=["meta"]),
-        Document(content="Doc2", meta={"f3": "0"}, id_hash_keys=["meta"]),
+        Document(content="Doc1", meta={"meta_field": "0"}, id_hash_keys=["meta"]),
+        Document(content="Doc1", meta={"meta_field": "1", "name": "file.txt"}, id_hash_keys=["meta"]),
+        Document(content="Doc2", meta={"name": "file_2.txt"}, id_hash_keys=["meta"]),
     ]
     document_store.write_documents(documents)
-    documents = document_store.get_all_documents(filters={"f1": ["1"]})
+    documents = document_store.get_all_documents(filters={"meta_field": ["1"]})
     assert documents[0].content == "Doc1"
     assert len(documents) == 1
-    assert {d.meta["meta_id"] for d in documents} == {"0"}
+    assert {d.meta["name"] for d in documents} == {"file.txt"}
 
-    documents = document_store.get_all_documents(filters={"f1": ["0"]})
+    documents = document_store.get_all_documents(filters={"meta_field": ["0"]})
     assert documents[0].content == "Doc1"
     assert len(documents) == 1
-    assert documents[0].meta.get("meta_id") is None
+    assert documents[0].meta.get("name") is None
 
-    documents = document_store.get_all_documents(filters={"f3": ["0"]})
+    documents = document_store.get_all_documents(filters={"name": ["file_2.txt"]})
     assert documents[0].content == "Doc2"
     assert len(documents) == 1
-    assert documents[0].meta.get("meta_id") is None
+    assert documents[0].meta.get("meta_field") is None
 
 
 def test_get_all_documents_with_correct_filters(document_store_with_docs):
-    documents = document_store_with_docs.get_all_documents(filters={"meta_field": ["test2"]})
-    assert len(documents) == 1
-    assert documents[0].meta["name"] == "filename2"
-
-    documents = document_store_with_docs.get_all_documents(filters={"meta_field": ["test1", "test3"]})
-    assert len(documents) == 2
-    assert {d.meta["name"] for d in documents} == {"filename1", "filename3"}
-    assert {d.meta["meta_field"] for d in documents} == {"test1", "test3"}
-
-
-def test_get_all_documents_with_correct_filters_legacy_sqlite(docs, tmp_path):
-    document_store_with_docs = get_document_store("sql", tmp_path)
-    document_store_with_docs.write_documents(docs)
-
-    document_store_with_docs.use_windowed_query = False
     documents = document_store_with_docs.get_all_documents(filters={"meta_field": ["test2"]})
     assert len(documents) == 1
     assert documents[0].meta["name"] == "filename2"
@@ -239,9 +165,8 @@ def test_get_all_documents_with_incorrect_filter_value(document_store_with_docs)
     assert len(documents) == 0
 
 
-@pytest.mark.parametrize(
-    "document_store_with_docs", ["elasticsearch", "sql", "weaviate", "memory", "pinecone"], indirect=True
-)
+# See test_pinecone.py
+@pytest.mark.parametrize("document_store_with_docs", ["elasticsearch", "weaviate", "memory"], indirect=True)
 def test_extended_filter(document_store_with_docs):
     # Test comparison operators individually
     documents = document_store_with_docs.get_all_documents(filters={"meta_field": {"$eq": "test1"}})
@@ -453,30 +378,6 @@ def test_write_document_meta(document_store: BaseDocumentStore):
     assert document_store.get_document_by_id("4").meta["meta_field"] == "test4"
 
 
-@pytest.mark.parametrize("document_store", ["sql"], indirect=True)
-def test_write_document_sql_invalid_meta(document_store: BaseDocumentStore):
-    documents = [
-        {
-            "content": "dict_with_invalid_meta",
-            "valid_meta_field": "test1",
-            "invalid_meta_field": [1, 2, 3],
-            "name": "filename1",
-            "id": "1",
-        },
-        Document(
-            content="document_object_with_invalid_meta",
-            meta={"valid_meta_field": "test2", "invalid_meta_field": [1, 2, 3], "name": "filename2"},
-            id="2",
-        ),
-    ]
-    document_store.write_documents(documents)
-    documents_in_store = document_store.get_all_documents()
-    assert len(documents_in_store) == 2
-
-    assert document_store.get_document_by_id("1").meta == {"name": "filename1", "valid_meta_field": "test1"}
-    assert document_store.get_document_by_id("2").meta == {"name": "filename2", "valid_meta_field": "test2"}
-
-
 def test_write_document_index(document_store: BaseDocumentStore):
     document_store.delete_index("haystack_test_one")
     document_store.delete_index("haystack_test_two")
@@ -550,7 +451,7 @@ def test_update_embeddings(document_store, retriever):
         "content": "text_7",
         "id": "7",
         "meta_field": "value_7",
-        "embedding": retriever.embed_queries(texts=["a random string"])[0],
+        "embedding": retriever.embed_queries(queries=["a random string"])[0],
     }
     document_store.write_documents([doc])
 
@@ -749,7 +650,6 @@ def test_labels(document_store: BaseDocumentStore):
         is_correct_answer=True,
         is_correct_document=True,
         document=Document(content="something", id="123"),
-        no_answer=False,
         origin="gold-label",
     )
     document_store.write_labels([label])
@@ -781,7 +681,6 @@ def test_labels(document_store: BaseDocumentStore):
         is_correct_answer=True,
         is_correct_document=True,
         document=Document(content="something", id="324"),
-        no_answer=False,
         origin="gold-label",
     )
     document_store.write_labels([label, label2])
@@ -827,6 +726,30 @@ def test_labels(document_store: BaseDocumentStore):
     assert len(labels) == 0
 
 
+@pytest.mark.parametrize("document_store", ["elasticsearch", "opensearch"], indirect=True)
+def test_labels_with_long_texts(document_store: BaseDocumentStore):
+    document_store.delete_index("label")
+    label = Label(
+        query="question1",
+        answer=Answer(
+            answer="answer",
+            type="extractive",
+            score=0.0,
+            context="something " * 10_000,
+            offsets_in_document=[Span(start=12, end=14)],
+            offsets_in_context=[Span(start=12, end=14)],
+        ),
+        is_correct_answer=True,
+        is_correct_document=True,
+        document=Document(content="something " * 10_000, id="123"),
+        origin="gold-label",
+    )
+    document_store.write_labels(labels=[label], index="label")
+    labels = document_store.get_all_labels(index="label")
+    assert len(labels) == 1
+    assert label == labels[0]
+
+
 # exclude weaviate because it does not support storing labels
 @pytest.mark.parametrize("document_store", ["elasticsearch", "faiss", "memory", "milvus1", "pinecone"], indirect=True)
 def test_multilabel(document_store: BaseDocumentStore):
@@ -838,7 +761,6 @@ def test_multilabel(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         # different answer in same doc
@@ -849,7 +771,6 @@ def test_multilabel(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         # answer in different doc
@@ -860,7 +781,6 @@ def test_multilabel(document_store: BaseDocumentStore):
             document=Document(content="some other", id="333"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         # 'no answer', should be excluded from MultiLabel
@@ -871,7 +791,6 @@ def test_multilabel(document_store: BaseDocumentStore):
             document=Document(content="some", id="777"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=True,
             origin="gold-label",
         ),
         # is_correct_answer=False, should be excluded from MultiLabel if "drop_negatives = True"
@@ -882,7 +801,6 @@ def test_multilabel(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=False,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
     ]
@@ -943,7 +861,6 @@ def test_multilabel_no_answer(document_store: BaseDocumentStore):
             is_correct_answer=True,
             is_correct_document=True,
             document=Document(content="some", id="777"),
-            no_answer=True,
             origin="gold-label",
         ),
         # no answer in different doc
@@ -953,7 +870,6 @@ def test_multilabel_no_answer(document_store: BaseDocumentStore):
             is_correct_answer=True,
             is_correct_document=True,
             document=Document(content="some", id="123"),
-            no_answer=True,
             origin="gold-label",
         ),
         # no answer in same doc, should be excluded
@@ -963,7 +879,6 @@ def test_multilabel_no_answer(document_store: BaseDocumentStore):
             is_correct_answer=True,
             is_correct_document=True,
             document=Document(content="some", id="777"),
-            no_answer=True,
             origin="gold-label",
         ),
         # no answer with is_correct_answer=False, should be excluded
@@ -973,7 +888,6 @@ def test_multilabel_no_answer(document_store: BaseDocumentStore):
             is_correct_answer=False,
             is_correct_document=True,
             document=Document(content="some", id="777"),
-            no_answer=True,
             origin="gold-label",
         ),
     ]
@@ -1013,7 +927,6 @@ def test_multilabel_filter_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             filters={"name": ["123"]},
         ),
@@ -1025,7 +938,6 @@ def test_multilabel_filter_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             filters={"name": ["123"]},
         ),
@@ -1037,7 +949,6 @@ def test_multilabel_filter_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some other", id="333"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             filters={"name": ["333"]},
         ),
@@ -1049,7 +960,6 @@ def test_multilabel_filter_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="777"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=True,
             origin="gold-label",
             filters={"name": ["777"]},
         ),
@@ -1061,7 +971,6 @@ def test_multilabel_filter_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=False,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             filters={"name": ["123"]},
         ),
@@ -1105,7 +1014,6 @@ def test_multilabel_meta_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             meta={"file_id": ["123"]},
         ),
@@ -1117,7 +1025,6 @@ def test_multilabel_meta_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             meta={"file_id": ["123"]},
         ),
@@ -1129,7 +1036,6 @@ def test_multilabel_meta_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some other", id="333"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             meta={"file_id": ["333"]},
         ),
@@ -1141,7 +1047,6 @@ def test_multilabel_meta_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="777"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=True,
             origin="gold-label",
             meta={"file_id": ["777"]},
         ),
@@ -1153,7 +1058,6 @@ def test_multilabel_meta_aggregations(document_store: BaseDocumentStore):
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
             meta={"file_id": ["888"]},
         ),
@@ -1243,164 +1147,6 @@ def test_get_meta_values_by_key(document_store: BaseDocumentStore):
         assert bucket["count"] == 1
 
 
-@pytest.mark.elasticsearch
-def test_elasticsearch_custom_fields():
-    document_store = ElasticsearchDocumentStore(
-        index="haystack_test_custom",
-        content_field="custom_text_field",
-        embedding_field="custom_embedding_field",
-        recreate_index=True,
-    )
-
-    doc_to_write = {"custom_text_field": "test", "custom_embedding_field": np.random.rand(768).astype(np.float32)}
-    document_store.write_documents([doc_to_write])
-    documents = document_store.get_all_documents(return_embedding=True)
-    assert len(documents) == 1
-    assert documents[0].content == "test"
-    np.testing.assert_array_equal(doc_to_write["custom_embedding_field"], documents[0].embedding)
-
-
-@pytest.mark.elasticsearch
-def test_elasticsearch_delete_index():
-    client = Elasticsearch()
-    index_name = "haystack_test_deletion"
-
-    document_store = ElasticsearchDocumentStore(index=index_name)
-
-    # the index should exist
-    index_exists = client.indices.exists(index=index_name)
-    assert index_exists
-
-    document_store.delete_index(index_name)
-
-    # the index was deleted and should not exist
-    index_exists = client.indices.exists(index=index_name)
-    assert not index_exists
-
-
-@pytest.mark.parametrize("document_store", ["elasticsearch"], indirect=True)
-def test_elasticsearch_query_with_filters_and_missing_embeddings(document_store: ElasticsearchDocumentStore):
-    document_store.write_documents(DOCUMENTS)
-    document_without_embedding = Document(
-        content="Doc without embedding", meta={"name": "name_7", "year": "2021", "month": "04"}
-    )
-    document_store.write_documents([document_without_embedding])
-    filters = {"year": "2021"}
-    document_store.skip_missing_embeddings = False
-    with pytest.raises(RequestError):
-        document_store.query_by_embedding(np.random.rand(768), filters=filters)
-
-    document_store.skip_missing_embeddings = True
-    documents = document_store.query_by_embedding(np.random.rand(768), filters=filters)
-    assert len(documents) == 3
-
-
-@pytest.mark.elasticsearch
-def test_get_document_count_only_documents_without_embedding_arg():
-    documents = [
-        {
-            "content": "text1",
-            "id": "1",
-            "embedding": np.random.rand(768).astype(np.float32),
-            "meta_field_for_count": "a",
-        },
-        {
-            "content": "text2",
-            "id": "2",
-            "embedding": np.random.rand(768).astype(np.float64),
-            "meta_field_for_count": "b",
-        },
-        {"content": "text3", "id": "3", "embedding": np.random.rand(768).astype(np.float32).tolist()},
-        {"content": "text4", "id": "4", "meta_field_for_count": "b"},
-        {"content": "text5", "id": "5", "meta_field_for_count": "b"},
-        {"content": "text6", "id": "6", "meta_field_for_count": "c"},
-        {
-            "content": "text7",
-            "id": "7",
-            "embedding": np.random.rand(768).astype(np.float64),
-            "meta_field_for_count": "c",
-        },
-    ]
-
-    _index: str = "haystack_test_count"
-    document_store = ElasticsearchDocumentStore(index=_index, recreate_index=True)
-
-    document_store.write_documents(documents)
-
-    assert document_store.get_document_count() == 7
-    assert document_store.get_document_count(only_documents_without_embedding=True) == 3
-    assert (
-        document_store.get_document_count(
-            only_documents_without_embedding=True, filters={"meta_field_for_count": ["c"]}
-        )
-        == 1
-    )
-    assert (
-        document_store.get_document_count(
-            only_documents_without_embedding=True, filters={"meta_field_for_count": ["b"]}
-        )
-        == 2
-    )
-
-
-@pytest.mark.elasticsearch
-def test_skip_missing_embeddings(caplog):
-    documents = [
-        {"content": "text1", "id": "1"},  # a document without embeddings
-        {"content": "text2", "id": "2", "embedding": np.random.rand(768).astype(np.float64)},
-        {"content": "text3", "id": "3", "embedding": np.random.rand(768).astype(np.float32).tolist()},
-        {"content": "text4", "id": "4", "embedding": np.random.rand(768).astype(np.float32)},
-    ]
-    document_store = ElasticsearchDocumentStore(index="skip_missing_embedding_index", recreate_index=True)
-    document_store.write_documents(documents)
-
-    document_store.skip_missing_embeddings = True
-    retrieved_docs = document_store.query_by_embedding(np.random.rand(768).astype(np.float32))
-    assert len(retrieved_docs) == 3
-
-    document_store.skip_missing_embeddings = False
-    with pytest.raises(RequestError):
-        document_store.query_by_embedding(np.random.rand(768).astype(np.float32))
-
-    # Test scenario with no embeddings for the entire index
-    documents = [
-        {"content": "text1", "id": "1"},
-        {"content": "text2", "id": "2"},
-        {"content": "text3", "id": "3"},
-        {"content": "text4", "id": "4"},
-    ]
-
-    document_store.delete_documents()
-    document_store.write_documents(documents)
-
-    document_store.skip_missing_embeddings = True
-    with caplog.at_level(logging.WARNING):
-        document_store.query_by_embedding(np.random.rand(768).astype(np.float32))
-        assert "No documents with embeddings. Run the document store's update_embeddings() method." in caplog.text
-
-
-@pytest.mark.elasticsearch
-def test_elasticsearch_synonyms():
-    synonyms = ["i-pod, i pod, ipod", "sea biscuit, sea biscit, seabiscuit", "foo, foo bar, baz"]
-    synonym_type = "synonym_graph"
-
-    client = Elasticsearch()
-    client.indices.delete(index="haystack_synonym_arg", ignore=[404])
-    document_store = ElasticsearchDocumentStore(
-        index="haystack_synonym_arg", synonyms=synonyms, synonym_type=synonym_type
-    )
-    indexed_settings = client.indices.get_settings(index="haystack_synonym_arg")
-
-    assert (
-        synonym_type
-        == indexed_settings["haystack_synonym_arg"]["settings"]["index"]["analysis"]["filter"]["synonym"]["type"]
-    )
-    assert (
-        synonyms
-        == indexed_settings["haystack_synonym_arg"]["settings"]["index"]["analysis"]["filter"]["synonym"]["synonyms"]
-    )
-
-
 @pytest.mark.parametrize(
     "document_store_with_docs", ["memory", "faiss", "milvus1", "weaviate", "elasticsearch"], indirect=True
 )
@@ -1413,8 +1159,15 @@ def test_similarity_score_sentence_transformers(document_store_with_docs):
     pipeline = DocumentSearchPipeline(retriever)
     prediction = pipeline.run("Paul lives in New York")
     scores = [document.score for document in prediction["documents"]]
+    assert [document.content for document in prediction["documents"]] == [
+        "My name is Paul and I live in New York",
+        "My name is Matteo and I live in Rome",
+        "My name is Christelle and I live in Paris",
+        "My name is Carla and I live in Berlin",
+        "My name is Camila and I live in Madrid",
+    ]
     assert scores == pytest.approx(
-        [0.8497486114501953, 0.6622999012470245, 0.6077829301357269, 0.5928314849734306, 0.5614184625446796], abs=1e-3
+        [0.9149981737136841, 0.6895168423652649, 0.641706794500351, 0.6206043660640717, 0.5837393924593925], abs=1e-3
     )
 
 
@@ -1516,532 +1269,6 @@ def test_custom_headers(document_store_with_docs: BaseDocumentStore):
         assert len(documents) > 0
 
 
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_init_with_dot_product():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=DC_TEST_INDEX)
-    assert document_store.return_embedding == False
-    assert document_store.similarity == "dot_product"
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_init_with_cosine():
-    document_store = DeepsetCloudDocumentStore(
-        api_endpoint=DC_API_ENDPOINT,
-        api_key=DC_API_KEY,
-        index=DC_TEST_INDEX,
-        similarity="cosine",
-        return_embedding=True,
-    )
-    assert document_store.return_embedding == True
-    assert document_store.similarity == "cosine"
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_invalid_token():
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/pipelines",
-            match=[matchers.header_matcher({"authorization": "Bearer invalid_token"})],
-            body="Internal Server Error",
-            status=500,
-        )
-
-    with pytest.raises(
-        DeepsetCloudError,
-        match=f"Could not connect to deepset Cloud:\nGET {DC_API_ENDPOINT}/workspaces/default/pipelines failed: HTTP 500 - Internal Server Error",
-    ):
-        DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key="invalid_token", index=DC_TEST_INDEX)
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_invalid_api_endpoint():
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET, url=f"{DC_API_ENDPOINT}00/workspaces/default/pipelines", body="Not Found", status=404
-        )
-
-    with pytest.raises(
-        DeepsetCloudError,
-        match=f"Could not connect to deepset Cloud:\nGET {DC_API_ENDPOINT}00/workspaces/default/pipelines failed: "
-        f"HTTP 404 - Not Found\nNot Found",
-    ):
-        DeepsetCloudDocumentStore(api_endpoint=f"{DC_API_ENDPOINT}00", api_key=DC_API_KEY, index=DC_TEST_INDEX)
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_invalid_index(caplog):
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/invalid_index",
-            body="Not Found",
-            status=404,
-        )
-
-    with caplog.at_level(logging.INFO):
-        DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index="invalid_index")
-        assert (
-            "You are using a DeepsetCloudDocumentStore with an index that does not exist on deepset Cloud."
-            in caplog.text
-        )
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_documents(deepset_cloud_document_store):
-    if MOCK_DC:
-        with open(SAMPLES_PATH / "dc" / "documents-stream.response", "r") as f:
-            documents_stream_response = f.read()
-            docs = [json.loads(l) for l in documents_stream_response.splitlines()]
-            filtered_docs = [doc for doc in docs if doc["meta"]["file_id"] == docs[0]["meta"]["file_id"]]
-            documents_stream_filtered_response = "\n".join([json.dumps(d) for d in filtered_docs])
-
-            responses.add(
-                method=responses.POST,
-                url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/{DC_TEST_INDEX}/documents-stream",
-                body=documents_stream_response,
-                status=200,
-            )
-
-            responses.add(
-                method=responses.POST,
-                url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/{DC_TEST_INDEX}/documents-stream",
-                match=[
-                    matchers.json_params_matcher(
-                        {"filters": {"file_id": [docs[0]["meta"]["file_id"]]}, "return_embedding": False}
-                    )
-                ],
-                body=documents_stream_filtered_response,
-                status=200,
-            )
-
-            for doc in filtered_docs:
-                responses.add(
-                    method=responses.GET,
-                    url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/{DC_TEST_INDEX}/documents/{doc['id']}",
-                    json=doc,
-                    status=200,
-                )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    docs = deepset_cloud_document_store.get_all_documents()
-    assert len(docs) > 1
-    assert isinstance(docs[0], Document)
-
-    first_doc = next(deepset_cloud_document_store.get_all_documents_generator())
-    assert isinstance(first_doc, Document)
-    assert first_doc.meta["file_id"] is not None
-
-    filtered_docs = deepset_cloud_document_store.get_all_documents(filters={"file_id": [first_doc.meta["file_id"]]})
-    assert len(filtered_docs) > 0
-    assert len(filtered_docs) < len(docs)
-
-    ids = [doc.id for doc in filtered_docs]
-    single_doc_by_id = deepset_cloud_document_store.get_document_by_id(ids[0])
-    assert single_doc_by_id is not None
-    assert single_doc_by_id.meta["file_id"] == first_doc.meta["file_id"]
-
-    docs_by_id = deepset_cloud_document_store.get_documents_by_id(ids)
-    assert len(docs_by_id) == len(filtered_docs)
-    for doc in docs_by_id:
-        assert doc.meta["file_id"] == first_doc.meta["file_id"]
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_query(deepset_cloud_document_store):
-    if MOCK_DC:
-        with open(SAMPLES_PATH / "dc" / "query_winterfell.response", "r") as f:
-            query_winterfell_response = f.read()
-            query_winterfell_docs = json.loads(query_winterfell_response)
-            query_winterfell_filtered_docs = [
-                doc
-                for doc in query_winterfell_docs
-                if doc["meta"]["file_id"] == query_winterfell_docs[0]["meta"]["file_id"]
-            ]
-            query_winterfell_filtered_response = json.dumps(query_winterfell_filtered_docs)
-
-        responses.add(
-            method=responses.POST,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/{DC_TEST_INDEX}/documents-query",
-            match=[
-                matchers.json_params_matcher(
-                    {"query": "winterfell", "top_k": 50, "all_terms_must_match": False, "scale_score": True}
-                )
-            ],
-            status=200,
-            body=query_winterfell_response,
-        )
-
-        responses.add(
-            method=responses.POST,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/{DC_TEST_INDEX}/documents-query",
-            match=[
-                matchers.json_params_matcher(
-                    {
-                        "query": "winterfell",
-                        "top_k": 50,
-                        "filters": {"file_id": [query_winterfell_docs[0]["meta"]["file_id"]]},
-                        "all_terms_must_match": False,
-                        "scale_score": True,
-                    }
-                )
-            ],
-            status=200,
-            body=query_winterfell_filtered_response,
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    docs = deepset_cloud_document_store.query("winterfell", top_k=50)
-    assert docs is not None
-    assert len(docs) > 0
-
-    first_doc = docs[0]
-    filtered_docs = deepset_cloud_document_store.query(
-        "winterfell", top_k=50, filters={"file_id": [first_doc.meta["file_id"]]}
-    )
-    assert len(filtered_docs) > 0
-    assert len(filtered_docs) < len(docs)
-
-
-@pytest.mark.parametrize(
-    "body, expected_count",
-    [
-        (
-            {
-                "data": [
-                    {
-                        "evaluation_set_id": str(uuid4()),
-                        "name": DC_TEST_INDEX,
-                        "created_at": "2022-03-22T13:40:27.535Z",
-                        "matched_labels": 2,
-                        "total_labels": 10,
-                    }
-                ],
-                "has_more": False,
-                "total": 1,
-            },
-            10,
-        ),
-        (
-            {
-                "data": [
-                    {
-                        "evaluation_set_id": str(uuid4()),
-                        "name": DC_TEST_INDEX,
-                        "created_at": "2022-03-22T13:40:27.535Z",
-                        "matched_labels": 0,
-                        "total_labels": 0,
-                    }
-                ],
-                "has_more": False,
-                "total": 1,
-            },
-            0,
-        ),
-    ],
-)
-@responses.activate
-def test_DeepsetCloudDocumentStore_count_of_labels_for_evaluation_set(
-    deepset_cloud_document_store, body: dict, expected_count: int
-):
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/evaluation_sets",
-            status=200,
-            body=json.dumps(body),
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    count = deepset_cloud_document_store.get_label_count(index=DC_TEST_INDEX)
-    assert count == expected_count
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_count_of_labels_for_evaluation_set_raises_DC_error_when_nothing_found(
-    deepset_cloud_document_store,
-):
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/evaluation_sets",
-            status=200,
-            body=json.dumps({"data": [], "has_more": False, "total": 0}),
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    with pytest.raises(DeepsetCloudError, match=f"No evaluation set found with the name {DC_TEST_INDEX}"):
-        deepset_cloud_document_store.get_label_count(index=DC_TEST_INDEX)
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_lists_evaluation_sets(deepset_cloud_document_store):
-    response_evaluation_set = {
-        "evaluation_set_id": str(uuid4()),
-        "name": DC_TEST_INDEX,
-        "created_at": "2022-03-22T13:40:27.535Z",
-        "matched_labels": 2,
-        "total_labels": 10,
-    }
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/evaluation_sets",
-            status=200,
-            body=json.dumps({"data": [response_evaluation_set], "has_more": False, "total": 1}),
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    evaluation_sets = deepset_cloud_document_store.get_evaluation_sets()
-    assert evaluation_sets == [response_evaluation_set]
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_fetches_labels_for_evaluation_set(deepset_cloud_document_store):
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/evaluation_sets/{DC_TEST_INDEX}",
-            status=200,
-            body=json.dumps(
-                [
-                    {
-                        "label_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                        "query": "What is berlin?",
-                        "answer": "biggest city in germany",
-                        "answer_start": 0,
-                        "answer_end": 0,
-                        "meta": {},
-                        "context": "Berlin is the biggest city in germany.",
-                        "external_file_name": "string",
-                        "file_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-                        "state": "Label matching status",
-                        "candidates": "Candidates that were found in the label <-> file matching",
-                    }
-                ]
-            ),
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    labels = deepset_cloud_document_store.get_all_labels(index=DC_TEST_INDEX)
-    assert labels == [
-        Label(
-            query="What is berlin?",
-            document=Document(content="Berlin is the biggest city in germany."),
-            is_correct_answer=True,
-            is_correct_document=True,
-            origin="user-feedback",
-            answer=Answer("biggest city in germany"),
-            id="3fa85f64-5717-4562-b3fc-2c963f66afa6",
-            no_answer=False,
-            pipeline_id=None,
-            created_at=None,
-            updated_at=None,
-            meta={},
-            filters={},
-        )
-    ]
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_fetches_labels_for_evaluation_set_raises_deepsetclouderror_when_nothing_found(
-    deepset_cloud_document_store,
-):
-    if MOCK_DC:
-        responses.add(
-            method=responses.GET,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/evaluation_sets/{DC_TEST_INDEX}",
-            status=404,
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    with pytest.raises(DeepsetCloudError, match=f"No evaluation set found with the name {DC_TEST_INDEX}"):
-        deepset_cloud_document_store.get_all_labels(index=DC_TEST_INDEX)
-
-
-@responses.activate
-def test_DeepsetCloudDocumentStore_query_by_embedding(deepset_cloud_document_store):
-    query_emb = np.random.randn(768)
-    if MOCK_DC:
-        responses.add(
-            method=responses.POST,
-            url=f"{DC_API_ENDPOINT}/workspaces/default/indexes/{DC_TEST_INDEX}/documents-query",
-            match=[
-                matchers.json_params_matcher(
-                    {"query_emb": query_emb.tolist(), "top_k": 10, "return_embedding": False, "scale_score": True}
-                )
-            ],
-            json=[],
-            status=200,
-        )
-    else:
-        responses.add_passthru(DC_API_ENDPOINT)
-
-    emb_docs = deepset_cloud_document_store.query_by_embedding(query_emb)
-    assert len(emb_docs) == 0
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_get_all_docs_without_index():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert document_store.get_all_documents() == []
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_get_all_docs_generator_without_index():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert list(document_store.get_all_documents_generator()) == []
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_get_doc_by_id_without_index():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert document_store.get_document_by_id(id="some id") == None
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_get_docs_by_id_without_index():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert document_store.get_documents_by_id(ids=["some id"]) == []
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_get_doc_count_without_index():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert document_store.get_document_count() == 0
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_query_by_emb_without_index():
-    query_emb = np.random.randn(768)
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert document_store.query_by_embedding(query_emb=query_emb) == []
-
-
-@pytest.mark.usefixtures(deepset_cloud_fixture.__name__)
-@responses.activate
-def test_DeepsetCloudDocumentStore_query_without_index():
-    document_store = DeepsetCloudDocumentStore(api_endpoint=DC_API_ENDPOINT, api_key=DC_API_KEY, index=None)
-    assert document_store.query(query="some query") == []
-
-
-@pytest.mark.elasticsearch
-def test_elasticsearch_search_field_mapping():
-
-    client = Elasticsearch()
-    client.indices.delete(index="haystack_search_field_mapping", ignore=[404])
-
-    index_data = [
-        {
-            "title": "Green tea components",
-            "meta": {
-                "content": "The green tea plant contains a range of healthy compounds that make it into the final drink",
-                "sub_content": "Drink tip",
-            },
-            "id": "1",
-        },
-        {
-            "title": "Green tea catechin",
-            "meta": {
-                "content": "Green tea contains a catechin called epigallocatechin-3-gallate (EGCG).",
-                "sub_content": "Ingredients tip",
-            },
-            "id": "2",
-        },
-        {
-            "title": "Minerals in Green tea",
-            "meta": {
-                "content": "Green tea also has small amounts of minerals that can benefit your health.",
-                "sub_content": "Minerals tip",
-            },
-            "id": "3",
-        },
-        {
-            "title": "Green tea Benefits",
-            "meta": {
-                "content": "Green tea does more than just keep you alert, it may also help boost brain function.",
-                "sub_content": "Health tip",
-            },
-            "id": "4",
-        },
-    ]
-
-    document_store = ElasticsearchDocumentStore(
-        index="haystack_search_field_mapping", search_fields=["content", "sub_content"], content_field="title"
-    )
-    document_store.write_documents(index_data)
-
-    indexed_settings = client.indices.get_mapping(index="haystack_search_field_mapping")
-
-    assert indexed_settings["haystack_search_field_mapping"]["mappings"]["properties"]["content"]["type"] == "text"
-    assert indexed_settings["haystack_search_field_mapping"]["mappings"]["properties"]["sub_content"]["type"] == "text"
-
-
-@pytest.mark.elasticsearch
-def test_elasticsearch_existing_alias():
-
-    client = Elasticsearch()
-    client.indices.delete(index="haystack_existing_alias_1", ignore=[404])
-    client.indices.delete(index="haystack_existing_alias_2", ignore=[404])
-    client.indices.delete_alias(index="_all", name="haystack_existing_alias", ignore=[404])
-
-    settings = {"mappings": {"properties": {"content": {"type": "text"}}}}
-
-    client.indices.create(index="haystack_existing_alias_1", body=settings)
-    client.indices.create(index="haystack_existing_alias_2", body=settings)
-
-    client.indices.put_alias(
-        index="haystack_existing_alias_1,haystack_existing_alias_2", name="haystack_existing_alias"
-    )
-
-    # To be valid, all indices related to the alias must have content field of type text
-    _ = ElasticsearchDocumentStore(index="haystack_existing_alias", search_fields=["content"])
-
-
-@pytest.mark.elasticsearch
-def test_elasticsearch_existing_alias_missing_fields():
-
-    client = Elasticsearch()
-    client.indices.delete(index="haystack_existing_alias_1", ignore=[404])
-    client.indices.delete(index="haystack_existing_alias_2", ignore=[404])
-    client.indices.delete_alias(index="_all", name="haystack_existing_alias", ignore=[404])
-
-    right_settings = {"mappings": {"properties": {"content": {"type": "text"}}}}
-
-    wrong_settings = {"mappings": {"properties": {"content": {"type": "histogram"}}}}
-
-    client.indices.create(index="haystack_existing_alias_1", body=right_settings)
-    client.indices.create(index="haystack_existing_alias_2", body=wrong_settings)
-
-    client.indices.put_alias(
-        index="haystack_existing_alias_1,haystack_existing_alias_2", name="haystack_existing_alias"
-    )
-
-    with pytest.raises(Exception):
-        # wrong field type for "content" in index "haystack_existing_alias_2"
-        _ = ElasticsearchDocumentStore(
-            index="haystack_existing_alias", search_fields=["content"], content_field="title"
-        )
-
-
 @pytest.mark.parametrize("document_store_with_docs", ["elasticsearch"], indirect=True)
 def test_elasticsearch_brownfield_support(document_store_with_docs):
     new_document_store = InMemoryDocumentStore()
@@ -2082,3 +1309,147 @@ def test_elasticsearch_brownfield_support(document_store_with_docs):
     assert all("numeric_field" in doc.meta for doc in transferred_documents)
     # Check if number of transferred_documents is equal to number of unique words.
     assert len(transferred_documents) == len(set(" ".join(original_content).split()))
+
+
+@pytest.mark.parametrize(
+    "document_store", ["faiss", "milvus1", "milvus", "weaviate", "opensearch", "elasticsearch", "memory"], indirect=True
+)
+def test_cosine_similarity(document_store: BaseDocumentStore):
+    # below we will write documents to the store and then query it to see if vectors were normalized or not
+    ensure_ids_are_correct_uuids(docs=DOCUMENTS, document_store=document_store)
+    document_store.write_documents(documents=DOCUMENTS)
+
+    query = np.random.rand(768).astype(np.float32)
+    query_results = document_store.query_by_embedding(
+        query_emb=query, top_k=len(DOCUMENTS), return_embedding=True, scale_score=False
+    )
+
+    # check if search with cosine similarity returns the correct number of results
+    assert len(query_results) == len(DOCUMENTS)
+
+    original_embeddings = {doc["content"]: doc["embedding"] for doc in DOCUMENTS}
+
+    for doc in query_results:
+        result_emb = doc.embedding
+        original_emb = original_embeddings[doc.content]
+
+        expected_emb = original_emb
+        # embeddings of document stores which only support dot product out of the box must be normalized
+        if (
+            isinstance(document_store, (FAISSDocumentStore, MilvusDocumentStore, WeaviateDocumentStore))
+            or type(document_store).name == "Milvus1DocumentStore"
+            or isinstance(document_store, OpenSearchDocumentStore)
+            and document_store.knn_engine == "faiss"
+        ):
+            expected_emb = original_emb / np.linalg.norm(original_emb)
+
+        # check if the stored embedding was normalized or not
+        np.testing.assert_allclose(
+            expected_emb, result_emb, rtol=0.2, atol=5e-07
+        )  # high tolerance necessary for Milvus 2
+
+        # check if the score is plausible for cosine similarity
+        cosine_score = np.dot(result_emb, query) / (np.linalg.norm(result_emb) * np.linalg.norm(query))
+        assert cosine_score == pytest.approx(doc.score, 0.01)
+
+
+@pytest.mark.parametrize(
+    "document_store", ["faiss", "milvus1", "milvus", "weaviate", "opensearch", "elasticsearch", "memory"], indirect=True
+)
+def test_update_embeddings_cosine_similarity(document_store: BaseDocumentStore):
+    # below we will write documents to the store and then query it to see if vectors were normalized
+    ensure_ids_are_correct_uuids(docs=DOCUMENTS, document_store=document_store)
+    # clear embeddings
+    docs = deepcopy(DOCUMENTS)
+    for doc in docs:
+        doc.pop("embedding")
+
+    document_store.write_documents(documents=docs)
+    original_embeddings = {}
+
+    # now check if vectors are normalized when updating embeddings
+    class MockRetriever:
+        def embed_documents(self, docs):
+            embeddings = []
+            for doc in docs:
+                embedding = np.random.rand(768).astype(np.float32)
+                original_embeddings[doc.content] = embedding
+                embeddings.append(embedding)
+            return np.stack(embeddings)
+
+    retriever = MockRetriever()
+    document_store.update_embeddings(retriever=retriever)
+
+    query = np.random.rand(768).astype(np.float32)
+    query_results = document_store.query_by_embedding(
+        query_emb=query, top_k=len(DOCUMENTS), return_embedding=True, scale_score=False
+    )
+
+    # check if search with cosine similarity returns the correct number of results
+    assert len(query_results) == len(DOCUMENTS)
+
+    for doc in query_results:
+        result_emb = doc.embedding
+        original_emb = original_embeddings[doc.content]
+
+        expected_emb = original_emb
+        # embeddings of document stores which only support dot product out of the box must be normalized
+        if (
+            isinstance(document_store, (FAISSDocumentStore, MilvusDocumentStore, WeaviateDocumentStore))
+            or type(document_store).name == "Milvus1DocumentStore"
+            or isinstance(document_store, OpenSearchDocumentStore)
+            and document_store.knn_engine == "faiss"
+        ):
+            expected_emb = original_emb / np.linalg.norm(original_emb)
+
+        # check if the stored embedding was normalized or not
+        np.testing.assert_allclose(
+            expected_emb, result_emb, rtol=0.2, atol=5e-07
+        )  # high tolerance necessary for Milvus 2
+
+        # check if the score is plausible for cosine similarity
+        cosine_score = np.dot(result_emb, query) / (np.linalg.norm(result_emb) * np.linalg.norm(query))
+        assert cosine_score == pytest.approx(doc.score, 0.01)
+
+
+@pytest.mark.parametrize(
+    "document_store_small",
+    ["faiss", "milvus1", "milvus", "weaviate", "memory", "elasticsearch", "opensearch"],
+    indirect=True,
+)
+def test_cosine_sanity_check(document_store_small):
+    VEC_1 = np.array([0.1, 0.2, 0.3], dtype="float32")
+    VEC_2 = np.array([0.4, 0.5, 0.6], dtype="float32")
+
+    # This is the cosine similarity of VEC_1 and VEC_2 calculated using sklearn.metrics.pairwise.cosine_similarity
+    # The score is normalized to yield a value between 0 and 1.
+    KNOWN_COSINE = 0.9746317
+    KNOWN_SCALED_COSINE = (KNOWN_COSINE + 1) / 2
+
+    docs = [{"name": "vec_1", "text": "vec_1", "content": "vec_1", "embedding": VEC_1}]
+    ensure_ids_are_correct_uuids(docs=docs, document_store=document_store_small)
+    document_store_small.write_documents(documents=docs)
+
+    query_results = document_store_small.query_by_embedding(
+        query_emb=VEC_2, top_k=1, return_embedding=True, scale_score=True
+    )
+
+    # check if faiss returns the same cosine similarity. Manual testing with faiss yielded 0.9746318
+    assert math.isclose(query_results[0].score, KNOWN_SCALED_COSINE, abs_tol=0.0002)
+
+    query_results = document_store_small.query_by_embedding(
+        query_emb=VEC_2, top_k=1, return_embedding=True, scale_score=False
+    )
+
+    # check if faiss returns the same cosine similarity. Manual testing with faiss yielded 0.9746318
+    assert math.isclose(query_results[0].score, KNOWN_COSINE, abs_tol=0.0002)
+
+
+def test_normalize_embeddings_diff_shapes():
+    VEC_1 = np.array([0.1, 0.2, 0.3], dtype="float32")
+    BaseDocumentStore.normalize_embedding(VEC_1)
+    assert np.linalg.norm(VEC_1) - 1 < 0.01
+
+    VEC_1 = np.array([0.1, 0.2, 0.3], dtype="float32").reshape(1, -1)
+    BaseDocumentStore.normalize_embedding(VEC_1)
+    assert np.linalg.norm(VEC_1) - 1 < 0.01

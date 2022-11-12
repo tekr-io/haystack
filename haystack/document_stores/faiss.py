@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Union, List, Optional, Dict, Generator
+from typing import Any, Union, List, Optional, Dict, Generator
 
 import json
 import logging
@@ -22,9 +22,7 @@ except (ImportError, ModuleNotFoundError) as ie:
 
 from haystack.schema import Document
 from haystack.document_stores.base import get_batches_from_generator
-
-if TYPE_CHECKING:
-    from haystack.nodes.retriever import BaseRetriever
+from haystack.nodes.retriever import DenseRetriever
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +42,7 @@ class FAISSDocumentStore(SQLDocumentStore):
     def __init__(
         self,
         sql_url: str = "sqlite:///faiss_document_store.db",
-        vector_dim: int = None,
+        vector_dim: Optional[int] = None,
         embedding_dim: int = 768,
         faiss_index_factory_str: str = "Flat",
         faiss_index: Optional[faiss.swigfaiss.Index] = None,
@@ -54,9 +52,9 @@ class FAISSDocumentStore(SQLDocumentStore):
         embedding_field: str = "embedding",
         progress_bar: bool = True,
         duplicate_documents: str = "overwrite",
-        faiss_index_path: Union[str, Path] = None,
-        faiss_config_path: Union[str, Path] = None,
-        isolation_level: str = None,
+        faiss_index_path: Optional[Union[str, Path]] = None,
+        faiss_config_path: Optional[Union[str, Path]] = None,
+        isolation_level: Optional[str] = None,
         n_links: int = 64,
         ef_search: int = 20,
         ef_construction: int = 80,
@@ -206,8 +204,6 @@ class FAISSDocumentStore(SQLDocumentStore):
             index = faiss.IndexHNSWFlat(embedding_dim, n_links, metric_type)
             index.hnsw.efSearch = ef_search
             index.hnsw.efConstruction = ef_construction
-            if "ivf" in index_factory.lower():  # enable reconstruction of vectors for inverted index
-                self.faiss_indexes[index].set_direct_map_type(faiss.DirectMap.Hashtable)
 
             logger.info(
                 f"HNSW params: n_links: {n_links}, efSearch: {index.hnsw.efSearch}, efConstruction: {index.hnsw.efConstruction}"
@@ -262,7 +258,7 @@ class FAISSDocumentStore(SQLDocumentStore):
             documents=document_objects, index=index, duplicate_documents=duplicate_documents
         )
         if len(document_objects) > 0:
-            add_vectors = False if document_objects[0].embedding is None else True
+            add_vectors = all(doc.embedding is not None for doc in document_objects)
 
             if self.duplicate_documents == "overwrite" and add_vectors:
                 logger.warning(
@@ -307,7 +303,7 @@ class FAISSDocumentStore(SQLDocumentStore):
 
     def update_embeddings(
         self,
-        retriever: "BaseRetriever",
+        retriever: DenseRetriever,
         index: Optional[str] = None,
         update_existing_embeddings: bool = True,
         filters: Optional[Dict[str, Any]] = None,  # TODO: Adapt type once we allow extended filters in FAISSDocStore
@@ -345,8 +341,8 @@ class FAISSDocumentStore(SQLDocumentStore):
             logger.warning("Calling DocumentStore.update_embeddings() on an empty index")
             return
 
-        logger.info(f"Updating embeddings for {document_count} docs...")
-        vector_id = sum(index.ntotal for index in self.faiss_indexes.values())
+        logger.info("Updating embeddings for %s docs...", document_count)
+        vector_id = self.faiss_indexes[index].ntotal
 
         result = self._query(
             index=index,
@@ -360,15 +356,15 @@ class FAISSDocumentStore(SQLDocumentStore):
             total=document_count, disable=not self.progress_bar, position=0, unit=" docs", desc="Updating Embedding"
         ) as progress_bar:
             for document_batch in batched_documents:
-                embeddings = retriever.embed_documents(document_batch)  # type: ignore
-                assert len(document_batch) == len(embeddings)
-
-                embeddings_to_index = np.array(embeddings, dtype="float32")
+                embeddings = retriever.embed_documents(document_batch)
+                self._validate_embeddings_shape(
+                    embeddings=embeddings, num_documents=len(document_batch), embedding_dim=self.embedding_dim
+                )
 
                 if self.similarity == "cosine":
-                    self.normalize_embedding(embeddings_to_index)
+                    self.normalize_embedding(embeddings)
 
-                self.faiss_indexes[index].add(embeddings_to_index)
+                self.faiss_indexes[index].add(embeddings.astype(np.float32))
 
                 vector_id_map = {}
                 for doc in document_batch:
@@ -498,7 +494,7 @@ class FAISSDocumentStore(SQLDocumentStore):
             raise NotImplementedError("FAISSDocumentStore does not support headers.")
 
         logger.warning(
-            """DEPRECATION WARNINGS: 
+            """DEPRECATION WARNINGS:
                 1. delete_all_documents() method is deprecated, please use delete_documents method
                 For more details, please refer to the issue: https://github.com/deepset-ai/haystack/issues/1045
                 """
@@ -559,7 +555,7 @@ class FAISSDocumentStore(SQLDocumentStore):
             )
         if index in self.faiss_indexes:
             del self.faiss_indexes[index]
-            logger.info(f"Index '{index}' deleted.")
+            logger.info("Index '%s' deleted.", index)
         super().delete_index(index)
 
     def query_by_embedding(

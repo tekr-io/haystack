@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile-GPU
-      # image: "deepset/haystack-gpu:latest"
+    image: "deepset/haystack-gpu:latest"
     # in recent docker-compose version you can enable GPU resources. Make sure to fulfill the prerequisites listed here: https://docs.docker.com/compose/gpu-support/
     deploy:
       resources:
@@ -15,15 +15,15 @@ services:
             count: 1
             capabilities: [gpu]
     # # Mount custom Pipeline YAML and custom Components.
-    volumes:
-      - ~/prototypes/assistant/haystack/pipeline:/home/user/rest_api/pipeline
+    # volumes:
+    #   - ./rest_api/pipeline:/home/user/rest_api/pipeline
     ports:
       - 8000:8000
     restart: on-failure
     environment:
       # See rest_api/pipeline/pipelines.haystack-pipeline.yml for configurations of Search & Indexing Pipeline.
-      # - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
-      - PIPELINE_YAML_PATH=/home/user/rest_api/pipeline/assistant.haystack-pipeline.yml
+      - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
+      - PIPELINE_YAML_PATH=/home/user/rest_api/rest_api/pipeline/pipelines_dpr.haystack-pipeline.yml
       - CONCURRENT_REQUEST_PER_WORKER
     depends_on:
       - elasticsearch
@@ -31,10 +31,10 @@ services:
 
   elasticsearch:
     # This will start an empty elasticsearch instance (so you have to add your documents yourself)
-    image: "elasticsearch:8.3.3"
+    #image: "elasticsearch:7.9.2"
     # If you want a demo image instead that is "ready-to-query" with some indexed articles
     # about countries and capital cities from Wikipedia:
-    # image: "deepset/elasticsearch-countries-and-capitals"
+    image: "deepset/elasticsearch-countries-and-capitals"
     ports:
       - 9200:9200
     restart: on-failure

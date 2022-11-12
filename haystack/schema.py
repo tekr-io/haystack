@@ -2,11 +2,10 @@ from __future__ import annotations
 import csv
 import hashlib
 
-import typing
 from typing import Any, Optional, Dict, List, Union
 
 try:
-    from typing import Literal
+    from typing import Literal  # type: ignore
 except ImportError:
     from typing_extensions import Literal  # type: ignore
 
@@ -16,21 +15,18 @@ import logging
 import time
 import json
 import ast
-from dataclasses import asdict
+from dataclasses import asdict, InitVar
 
 import mmh3
 import numpy as np
 import pandas as pd
 
-from pydantic import BaseConfig
+from pydantic import BaseConfig, Field
 from pydantic.json import pydantic_encoder
 
-if not typing.TYPE_CHECKING:
-    # We are using Pydantic dataclasses instead of vanilla Python's
-    # See #1598 for the reasons behind this choice & performance considerations
-    from pydantic.dataclasses import dataclass
-else:
-    from dataclasses import dataclass  # type: ignore  # pylint: disable=ungrouped-imports
+# We are using Pydantic dataclasses instead of vanilla Python's
+# See #1598 for the reasons behind this choice & performance considerations
+from pydantic.dataclasses import dataclass
 
 
 logger = logging.getLogger(__name__)
@@ -38,15 +34,19 @@ logger = logging.getLogger(__name__)
 
 BaseConfig.arbitrary_types_allowed = True
 
+#: Types of content_types supported
+ContentTypes = Literal["text", "table", "image", "audio"]
+
 
 @dataclass
 class Document:
-    content: Union[str, pd.DataFrame]
-    content_type: Literal["text", "table", "image", "audio"]
     id: str
-    meta: Dict[str, Any]
+    content: Union[str, pd.DataFrame]
+    content_type: ContentTypes = Field(default="text")
+    meta: Dict[str, Any] = Field(default={})
     score: Optional[float] = None
     embedding: Optional[np.ndarray] = None
+    id_hash_keys: InitVar[Optional[List[str]]] = None
 
     # We use a custom init here as we want some custom logic. The annotations above are however still needed in order
     # to use some dataclass magic like "asdict()". See https://www.python.org/dev/peps/pep-0557/#custom-init-method
@@ -55,10 +55,10 @@ class Document:
     def __init__(
         self,
         content: Union[str, pd.DataFrame],
-        content_type: Literal["text", "table", "image", "audio"] = "text",
+        content_type: ContentTypes = "text",
         id: Optional[str] = None,
         score: Optional[float] = None,
-        meta: Dict[str, Any] = None,
+        meta: Optional[Dict[str, Any]] = None,
         embedding: Optional[np.ndarray] = None,
         id_hash_keys: Optional[List[str]] = None,
     ):
@@ -66,17 +66,13 @@ class Document:
         One of the core data classes in Haystack. It's used to represent documents / passages in a standardized way within Haystack.
         Documents are stored in DocumentStores, are returned by Retrievers, are the input for Readers and are used in
         many other places that manipulate or interact with document-level data.
-
         Note: There can be multiple Documents originating from one file (e.g. PDF), if you split the text
         into smaller passages. We'll have one Document per passage in this case.
-
         Each document has a unique ID. This can be supplied by the user or generated automatically.
         It's particularly helpful for handling of duplicates and referencing documents in other objects (e.g. Labels)
-
         There's an easy option to convert from/to dicts via `from_dict()` and `to_dict`.
-
         :param content: Content of the document. For most cases, this will be text, but it can be a table or image.
-        :param content_type: One of "text", "table" or "image". Haystack components can use this to adjust their
+        :param content_type: One of "text", "table", "image" or "audio". Haystack components can use this to adjust their
                              handling of Documents and check compatibility.
         :param id: Unique ID for the document. If not supplied by the user, we'll generate one automatically by
                    creating a hash from the supplied text. This behaviour can be further adjusted by `id_hash_keys`.
@@ -154,6 +150,9 @@ class Document:
         inv_field_map = {v: k for k, v in field_map.items()}
         _doc: Dict[str, str] = {}
         for k, v in self.__dict__.items():
+            # Exclude internal fields (Pydantic, ...) fields from the conversion process
+            if k.startswith("__"):
+                continue
             if k == "content":
                 # Convert pd.DataFrame to list of rows for serialization
                 if self.content_type == "table" and isinstance(self.content, pd.DataFrame):
@@ -184,6 +183,9 @@ class Document:
             _doc["meta"] = {}
         # copy additional fields into "meta"
         for k, v in _doc.items():
+            # Exclude internal fields (Pydantic, ...) fields from the conversion process
+            if k.startswith("__"):
+                continue
             if k not in init_args and k not in field_map:
                 _doc["meta"][k] = v
         # remove additional fields from top level
@@ -226,13 +228,17 @@ class Document:
         )
 
     def __repr__(self):
-        return f"<Document: {str(self.to_dict())}>"
+        doc_dict = self.to_dict()
+        embedding = doc_dict.get("embedding", None)
+        if embedding is not None:
+            doc_dict["embedding"] = f"<embedding of shape {getattr(embedding, 'shape', '[no shape]')}>"
+        return f"<Document: {str(doc_dict)}>"
 
     def __str__(self):
         # In some cases, self.content is None (therefore not subscriptable)
         if self.content is None:
             return f"<Document: id={self.id}, content=None>"
-        return f"<Document: id={self.id}, content='{self.content[:100]} {'...' if len(self.content) > 100 else ''}'>"
+        return f"<Document: id={self.id}, content='{self.content[:100]}{'...' if len(self.content) > 100 else ''}'>"
 
     def __lt__(self, other):
         """Enable sorting of Documents by score"""
@@ -260,7 +266,7 @@ class SpeechDocument(Document):
         # In some cases, self.content is None (therefore not subscriptable)
         if self.content is None:
             return f"<SpeechDocument: id={self.id}, content=None>"
-        return f"<SpeechDocument: id={self.id}, content='{self.content[:100]} {'...' if len(self.content) > 100 else ''}', content_audio={self.content_audio}>"
+        return f"<SpeechDocument: id={self.id}, content='{self.content[:100]}{'...' if len(self.content) > 100 else ''}', content_audio={self.content_audio}>"
 
     def to_dict(self, field_map={}) -> Dict:
         dictionary = super().to_dict(field_map=field_map)
@@ -277,7 +283,10 @@ class SpeechDocument(Document):
 
     @classmethod
     def from_text_document(
-        cls, document_object: Document, audio_content: Any = None, additional_meta: Optional[Dict[str, Any]] = None
+        cls,
+        document_object: Document,
+        audio_content: Optional[Any] = None,
+        additional_meta: Optional[Dict[str, Any]] = None,
     ):
         doc_dict = document_object.to_dict()
         doc_dict = {key: value for key, value in doc_dict.items() if value}
@@ -294,13 +303,54 @@ class Span:
     start: int
     end: int
     """
-    Defining a sequence of characters (Text span) or cells (Table span) via start and end index. 
-    For extractive QA: Character where answer starts/ends  
+    Defining a sequence of characters (Text span) or cells (Table span) via start and end index.
+    For extractive QA: Character where answer starts/ends
     For TableQA: Cell where the answer starts/ends (counted from top left to bottom right of table)
-    
+
     :param start: Position where the span starts
     :param end:  Position where the spand ends
     """
+
+    def __contains__(self, value):
+        """
+        Checks for inclusion of the given value into the interval defined by Span.
+        ```
+            assert 10 in Span(5, 15)  # True
+            assert 20 in Span(1, 15)  # False
+        ```
+        Includes the left edge, but not the right edge.
+        ```
+            assert 5 in Span(5, 15)   # True
+            assert 15 in Span(5, 15)  # False
+        ```
+        Works for numbers and all values that can be safely converted into floats.
+        ```
+            assert 10.0 in Span(5, 15)   # True
+            assert "10" in Span(5, 15)   # True
+        ```
+        It also works for Span objects, returning True only if the given
+        Span is fully contained into the original Span.
+        As for numerical values, the left edge is included, the right edge is not.
+        ```
+            assert Span(10, 11) in Span(5, 15)   # True
+            assert Span(5, 10) in Span(5, 15)    # True
+            assert Span(10, 15) in Span(5, 15)   # False
+            assert Span(5, 15) in Span(5, 15)    # False
+            assert Span(5, 14) in Span(5, 15)    # True
+            assert Span(0, 1) in Span(5, 15)     # False
+            assert Span(0, 10) in Span(5, 15)    # False
+            assert Span(10, 20) in Span(5, 15)   # False
+        ```
+        """
+        if isinstance(value, Span):
+            return self.start <= value.start and self.end > value.end
+        try:
+            value = float(value)
+            return self.start <= value < self.end
+        except Exception as e:
+            raise ValueError(
+                f"Cannot use 'in' with a value of type {type(value)}. Use numeric values or Span objects."
+            ) from e
 
 
 @dataclass
@@ -319,24 +369,24 @@ class Answer:
     For example, it's used within some Nodes like the Reader, but also in the REST API.
 
     :param answer: The answer string. If there's no possible answer (aka "no_answer" or "is_impossible) this will be an empty string.
-    :param type: One of ("generative", "extractive", "other"): Whether this answer comes from an extractive model 
-                 (i.e. we can locate an exact answer string in one of the documents) or from a generative model 
-                 (i.e. no pointer to a specific document, no offsets ...). 
+    :param type: One of ("generative", "extractive", "other"): Whether this answer comes from an extractive model
+                 (i.e. we can locate an exact answer string in one of the documents) or from a generative model
+                 (i.e. no pointer to a specific document, no offsets ...).
     :param score: The relevance score of the Answer determined by a model (e.g. Reader or Generator).
                   In the range of [0,1], where 1 means extremely relevant.
     :param context: The related content that was used to create the answer (i.e. a text passage, part of a table, image ...)
     :param offsets_in_document: List of `Span` objects with start and end positions of the answer **in the
                                 document** (as stored in the document store).
-                                For extractive QA: Character where answer starts => `Answer.offsets_in_document[0].start 
+                                For extractive QA: Character where answer starts => `Answer.offsets_in_document[0].start
                                 For TableQA: Cell where the answer starts (counted from top left to bottom right of table) => `Answer.offsets_in_document[0].start
-                                (Note that in TableQA there can be multiple cell ranges that are relevant for the answer, thus there can be multiple `Spans` here) 
+                                (Note that in TableQA there can be multiple cell ranges that are relevant for the answer, thus there can be multiple `Spans` here)
     :param offsets_in_context: List of `Span` objects with start and end positions of the answer **in the
                                 context** (i.e. the surrounding text/table of a certain window size).
-                                For extractive QA: Character where answer starts => `Answer.offsets_in_document[0].start 
+                                For extractive QA: Character where answer starts => `Answer.offsets_in_document[0].start
                                 For TableQA: Cell where the answer starts (counted from top left to bottom right of table) => `Answer.offsets_in_document[0].start
-                                (Note that in TableQA there can be multiple cell ranges that are relevant for the answer, thus there can be multiple `Spans` here) 
+                                (Note that in TableQA there can be multiple cell ranges that are relevant for the answer, thus there can be multiple `Spans` here)
     :param document_id: ID of the document that the answer was located it (if any)
-    :param meta: Dict that can be used to associate any kind of custom meta data with the answer. 
+    :param meta: Dict that can be used to associate any kind of custom meta data with the answer.
                  In extractive QA, this will carry the meta data of the document where the answer was found.
     """
 
@@ -447,7 +497,6 @@ class Label:
     is_correct_document: bool
     origin: Literal["user-feedback", "gold-label"]
     answer: Optional[Answer] = None
-    no_answer: Optional[bool] = None
     pipeline_id: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -465,7 +514,6 @@ class Label:
         origin: Literal["user-feedback", "gold-label"],
         answer: Optional[Answer],
         id: Optional[str] = None,
-        no_answer: Optional[bool] = None,
         pipeline_id: Optional[str] = None,
         created_at: Optional[str] = None,
         updated_at: Optional[str] = None,
@@ -486,7 +534,6 @@ class Label:
                                     the returned document was correct.
         :param origin: the source for the labels. It can be used to later for filtering.
         :param id: Unique ID used within the DocumentStore. If not supplied, a uuid will be generated automatically.
-        :param no_answer: whether the question in unanswerable.
         :param pipeline_id: pipeline identifier (any str) that was involved for generating this label (in-case of user feedback).
         :param created_at: Timestamp of creation with format yyyy-MM-dd HH:mm:ss.
                            Generate in Python via time.strftime("%Y-%m-%d %H:%M:%S").
@@ -524,23 +571,6 @@ class Label:
         self.is_correct_document = is_correct_document
         self.origin = origin
 
-        # If an Answer is provided we need to make sure that it's consistent with the `no_answer` value
-        # TODO: reassess if we want to enforce Span.start=0 and Span.end=0 for no_answer=True
-        if self.answer is not None:
-            if no_answer == True:
-                if self.answer.answer != "" or self.answer.context:
-                    raise ValueError(f"Got no_answer == True while there seems to be an possible Answer: {self.answer}")
-            elif no_answer == False:
-                if self.answer.answer == "":
-                    raise ValueError(
-                        f"Got no_answer == False while there seems to be no possible Answer: {self.answer}"
-                    )
-            else:
-                # Automatically infer no_answer from Answer object
-                no_answer = self.answer.answer == "" or self.answer.answer is None
-
-        self.no_answer = no_answer
-
         # TODO autofill answer.document_id if Document is provided
 
         self.pipeline_id = pipeline_id
@@ -549,6 +579,13 @@ class Label:
         else:
             self.meta = meta
         self.filters = filters
+
+    @property
+    def no_answer(self) -> Optional[bool]:
+        no_answer = None
+        if self.answer is not None:
+            no_answer = self.answer.answer is None or self.answer.answer.strip() == ""
+        return no_answer
 
     def to_dict(self):
         return asdict(self)
@@ -610,11 +647,12 @@ class MultiLabel:
     labels: List[Label]
     query: str
     answers: List[str]
-    no_answer: bool
     document_ids: List[str]
     contexts: List[str]
     offsets_in_contexts: List[Dict]
     offsets_in_documents: List[Dict]
+    drop_negative_labels: InitVar[bool] = False
+    drop_no_answer: InitVar[bool] = False
 
     def __init__(self, labels: List[Label], drop_negative_labels=False, drop_no_answers=False, **kwargs):
         """
@@ -676,8 +714,9 @@ class MultiLabel:
         # as separate no_answer labels, and thus with document.id but without answer.document_id.
         # If we do not exclude them from document_ids this would be problematic for retriever evaluation as they do not contain the answer.
         # Hence, we exclude them here as well.
+
         self.document_ids = [l.document.id for l in self.labels if not l.no_answer]
-        self.contexts = [l.document.content for l in self.labels if not l.no_answer]
+        self.contexts = [str(l.document.content) for l in self.labels if not l.no_answer]
 
     def _aggregate_labels(self, key, must_be_single_value=True) -> List[Any]:
         if any(isinstance(getattr(l, key), dict) for l in self.labels):
@@ -744,7 +783,7 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 class EvaluationResult:
-    def __init__(self, node_results: Dict[str, pd.DataFrame] = None) -> None:
+    def __init__(self, node_results: Optional[Dict[str, pd.DataFrame]] = None) -> None:
         """
         A convenience class to store, pass, and interact with results of a pipeline evaluation run (for example `pipeline.eval()`).
         Detailed results are stored as one dataframe per node. This class makes them more accessible and provides
@@ -1387,7 +1426,7 @@ class EvaluationResult:
                         index=False, quoting=csv.QUOTE_NONNUMERIC (to avoid problems with \r chars)
         """
         out_dir = out_dir if isinstance(out_dir, Path) else Path(out_dir)
-        logger.info(f"Saving evaluation results to {out_dir}")
+        logger.info("Saving evaluation results to %s", out_dir)
         if not out_dir.exists():
             out_dir.mkdir(parents=True)
         for node_name, df in self.node_results.items():

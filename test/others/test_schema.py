@@ -1,6 +1,7 @@
 from haystack.schema import Document, Label, Answer, Span, MultiLabel, SpeechDocument, SpeechAnswer
 import pytest
 import numpy as np
+import pandas as pd
 
 from ..conftest import SAMPLES_PATH
 
@@ -60,7 +61,6 @@ def test_no_answer_label():
             is_correct_answer=True,
             is_correct_document=True,
             document=Document(content="some", id="777"),
-            no_answer=True,
             origin="gold-label",
         ),
         Label(
@@ -77,7 +77,6 @@ def test_no_answer_label():
             is_correct_answer=True,
             is_correct_document=True,
             document=Document(content="some", id="777"),
-            no_answer=False,
             origin="gold-label",
         ),
     ]
@@ -248,7 +247,6 @@ def test_multilabel_preserve_order():
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -258,7 +256,6 @@ def test_multilabel_preserve_order():
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -268,7 +265,6 @@ def test_multilabel_preserve_order():
             document=Document(content="some other", id="333"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -278,7 +274,6 @@ def test_multilabel_preserve_order():
             document=Document(content="some", id="777"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=True,
             origin="gold-label",
         ),
         Label(
@@ -288,7 +283,6 @@ def test_multilabel_preserve_order():
             document=Document(content="some", id="123"),
             is_correct_answer=False,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
     ]
@@ -308,7 +302,6 @@ def test_multilabel_preserve_order_w_duplicates():
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -318,7 +311,6 @@ def test_multilabel_preserve_order_w_duplicates():
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -328,7 +320,6 @@ def test_multilabel_preserve_order_w_duplicates():
             document=Document(content="some other", id="333"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -338,7 +329,6 @@ def test_multilabel_preserve_order_w_duplicates():
             document=Document(content="some", id="123"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
         Label(
@@ -348,7 +338,6 @@ def test_multilabel_preserve_order_w_duplicates():
             document=Document(content="some other", id="333"),
             is_correct_answer=True,
             is_correct_document=True,
-            no_answer=False,
             origin="gold-label",
         ),
     ]
@@ -399,6 +388,19 @@ def test_multilabel_id():
     assert MultiLabel(labels=[label1]).id == "33a3e58e13b16e9d6ec682ffe59ccc89"
     assert MultiLabel(labels=[label2]).id == "1b3ad38b629db7b0e869373b01bc32b1"
     assert MultiLabel(labels=[label3]).id == "531445fa3bdf98b8598a3bea032bd605"
+
+
+def test_multilabel_with_doc_containing_dataframes():
+    label = Label(
+        query="A question",
+        document=Document(content=pd.DataFrame({"col1": [1, 2], "col2": [3, 4]})),
+        is_correct_answer=True,
+        is_correct_document=True,
+        origin="gold-label",
+        answer=Answer(answer="answer 1"),
+    )
+    assert len(MultiLabel(labels=[label]).contexts) == 1
+    assert type(MultiLabel(labels=[label]).contexts[0]) is str
 
 
 def test_serialize_speech_document():
@@ -453,3 +455,32 @@ def test_deserialize_speech_answer():
         context_audio=SAMPLES_PATH / "audio" / "the context for this answer is here.wav",
     )
     assert speech_answer == SpeechAnswer.from_dict(speech_answer.to_dict())
+
+
+def test_span_in():
+    assert 10 in Span(5, 15)
+    assert not 20 in Span(1, 15)
+
+
+def test_span_in_edges():
+    assert 5 in Span(5, 15)
+    assert not 15 in Span(5, 15)
+
+
+def test_span_in_other_values():
+    assert 10.0 in Span(5, 15)
+    assert "10" in Span(5, 15)
+    with pytest.raises(ValueError):
+        "hello" in Span(5, 15)
+
+
+def test_assert_span_vs_span():
+    assert Span(10, 11) in Span(5, 15)
+    assert Span(5, 10) in Span(5, 15)
+    assert not Span(10, 15) in Span(5, 15)
+    assert not Span(5, 15) in Span(5, 15)
+    assert Span(5, 14) in Span(5, 15)
+
+    assert not Span(0, 1) in Span(5, 15)
+    assert not Span(0, 10) in Span(5, 15)
+    assert not Span(10, 20) in Span(5, 15)
