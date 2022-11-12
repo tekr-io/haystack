@@ -15,7 +15,7 @@ services:
       # See rest_api/pipeline/pipelines.haystack-pipeline.yml for configurations of Search & Indexing Pipeline.
       # - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
       - PIPELINE_YAML_PATH=/home/user/rest_api/pipeline/lukaz-dev.haystack-pipeline.yml
-      - CONCURRENT_REQUEST_PER_WORKER
+      - CONCURRENT_REQUEST_PER_WORKER=8
     depends_on:
       - elasticsearch
     # Starts REST API with only 2 workers so that it can be run on systems with just 4GB of memory
