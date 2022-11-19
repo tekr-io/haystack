@@ -7,17 +7,20 @@ from pathlib import Path
 
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, Depends
 from pydantic import BaseModel
-from haystack.document_stores import ElasticsearchDocumentStore
 from haystack import Pipeline
-from haystack.nodes import BaseConverter, PreProcessor, PDFToTextConverter, EmbeddingRetriever
+from haystack.document_stores import ElasticsearchDocumentStore
+from haystack.nodes import FileTypeClassifier, MarkdownConverter, PDFToTextConverter, \
+    TextConverter, PreProcessor, EmbeddingRetriever
 
 from rest_api.utils import get_app, get_pipelines
 from rest_api.config import FILE_UPLOAD_PATH
+from rest_api.config import ELASTIC_HOST
+from rest_api.config import ELASTIC_PASSWORD
 from rest_api.controller.utils import as_form
-
 
 router = APIRouter()
 app: FastAPI = get_app()
+
 
 @as_form
 class FileConverterParams(BaseModel):
@@ -42,11 +45,11 @@ class Response(BaseModel):
 
 @router.post("/index")
 def upload_file(
-    files: List[UploadFile] = File(...),
-    # JSON serialized string
-    meta: Optional[str] = Form("null"),  # type: ignore
-    fileconverter_params: FileConverterParams = Depends(FileConverterParams.as_form),  # type: ignore
-    preprocessor_params: PreprocessorParams = Depends(PreprocessorParams.as_form),  # type: ignore
+        files: List[UploadFile] = File(...),
+        # JSON serialized string
+        meta: Optional[str] = Form("null"),  # type: ignore
+        fileconverter_params: FileConverterParams = Depends(FileConverterParams.as_form),  # type: ignore
+        preprocessor_params: PreprocessorParams = Depends(PreprocessorParams.as_form),  # type: ignore
 ):
     file_paths: list = []
     file_metas: list = []
@@ -70,10 +73,10 @@ def upload_file(
     document_store = ElasticsearchDocumentStore(
         similarity='cosine',
         embedding_dim=768,
-        host='tekr.es.europe-west3.gcp.cloud.es.io',
+        host=ELASTIC_HOST,
         port=9243,
         username='elastic',
-        password='EaTmUIlTRQdRCnDuHmI1BNsl',
+        password=ELASTIC_PASSWORD,
         scheme='https',
         ca_certs='/etc/ssl/certs/ca-certificates.crt',
         verify_certs=True,
@@ -83,11 +86,14 @@ def upload_file(
 
     embedding_retriever = EmbeddingRetriever(
         document_store=document_store,
-        embedding_model='sentence-transformers/multi-qa-mpnet-base-dot-v1',
+        embedding_model='sentence-transformers/multi-qa-mpnet-base-cos-v1',
         model_format='sentence_transformers'
     )
 
-    text_converter = PDFToTextConverter()
+    file_type_classifier = FileTypeClassifier()
+    text_converter = TextConverter()
+    pdf_converter = PDFToTextConverter()
+    md_converter = MarkdownConverter()
 
     preprocessor = PreProcessor(
         clean_empty_lines=True,
@@ -98,24 +104,16 @@ def upload_file(
         split_respect_sentence_boundary=False,
         split_overlap=0
     )
-    
+
     p = Pipeline()
-    
-    p.add_node(component=text_converter, name='TextConverter', inputs=['File'])
-    p.add_node(component=preprocessor, name='PreProcessor', inputs=['TextConverter'])
+
+    p.add_node(component=file_type_classifier, name='FileTypeClassifier', inputs=['File'])
+    p.add_node(component=text_converter, name='TextConverter', inputs=['FileTypeClassifier.output_1'])
+    p.add_node(component=pdf_converter, name='PDFToTextConverter', inputs=['FileTypeClassifier.output_2'])
+    p.add_node(component=md_converter, name='MarkdownConverter', inputs=['FileTypeClassifier.output_3'])
+    p.add_node(component=preprocessor, name='PreProcessor',
+               inputs=['TextConverter', 'PDFToTextConverter', 'MarkdownConverter'])
     p.add_node(component=embedding_retriever, name='EmbeddingRetriever', inputs=['PreProcessor'])
     p.add_node(component=document_store, name='DocumentStore', inputs=['EmbeddingRetriever'])
 
     p.run(file_paths=file_paths, meta=file_metas)
-
-    # Find nodes names
-    # converters = indexing_pipeline.get_nodes_by_class(BaseConverter)
-    # preprocessors = indexing_pipeline.get_nodes_by_class(PreProcessor)
-    # 
-    # params = {}
-    # for converter in converters:
-    #     params[converter.name] = fileconverter_params.dict()
-    # for preprocessor in preprocessors:
-    #     params[preprocessor.name] = preprocessor_params.dict()
-    # 
-    # indexing_pipeline.run(file_paths=file_paths, meta=file_metas, params=params)

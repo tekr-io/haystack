@@ -9,7 +9,7 @@ services:
     # image: "deepset/haystack-cpu:latest"
     # Mount custom Pipeline YAML and custom Components.
     volumes:
-      - /home/lukaz/lukaz/haystack/pipeline:/home/user/rest_api/pipeline
+      - /home/x/workspace/tekr/ai/lukaz/haystack/pipeline:/home/user/rest_api/pipeline
     ports:
       - 8000:8000
     restart: on-failure
@@ -18,6 +18,8 @@ services:
       # - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
       - PIPELINE_YAML_PATH=/home/user/rest_api/pipeline/lukaz.haystack-pipeline.yml
       - QUERY_PIPELINE_NAME=query
+      - ELASTIC_HOST=tekr.es.europe-west3.gcp.cloud.es.io
+      - ELASTIC_PASSWORD=EaTmUIlTRQdRCnDuHmI1BNsl
       - TOKENIZERS_PARALLELISM=false
     depends_on:
       elasticsearch:
