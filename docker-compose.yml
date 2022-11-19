@@ -9,7 +9,7 @@ services:
     # image: "deepset/haystack-cpu:latest"
     # Mount custom Pipeline YAML and custom Components.
     volumes:
-      - /home/x/workspace/tekr/ai/lukaz/haystack/pipeline:/home/user/rest_api/pipeline
+      - /home/lukaz/lukaz/haystack/pipeline:/home/user/rest_api/pipeline
     ports:
       - 8000:8000
     restart: on-failure
