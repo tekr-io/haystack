@@ -15,7 +15,7 @@ services:
     restart: on-failure
     environment:
       # See rest_api/pipeline/pipelines.haystack-pipeline.yml for configurations of Search & Indexing Pipeline.
-      - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
+      # - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
       - PIPELINE_YAML_PATH=/home/user/rest_api/pipeline/lukaz.haystack-pipeline.yml
       - QUERY_PIPELINE_NAME=query
       - TOKENIZERS_PARALLELISM=false
