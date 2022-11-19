@@ -2,14 +2,21 @@ services:
 
   haystack-api:
     # Pull Haystack's latest commit
-    image: "deepset/haystack:cpu-main"
+    # image: "deepset/haystack:cpu-main"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # image: "deepset/haystack-cpu:latest"
+    # Mount custom Pipeline YAML and custom Components.
+    volumes:
+      - /home/lukaz/haystack/pipeline:/home/user/rest_api/pipeline
     ports:
       - 8000:8000
     restart: on-failure
     environment:
       # See rest_api/pipeline/pipelines.haystack-pipeline.yml for configurations of Search & Indexing Pipeline.
       - DOCUMENTSTORE_PARAMS_HOST=elasticsearch
-      - PIPELINE_YAML_PATH=/opt/venv/lib/python3.10/site-packages/rest_api/pipeline/pipelines.haystack-pipeline.yml
+      - PIPELINE_YAML_PATH=/home/user/rest_api/pipeline/lukaz.haystack-pipeline.yml
       - QUERY_PIPELINE_NAME=query
       - TOKENIZERS_PARALLELISM=false
     depends_on:
@@ -32,22 +39,22 @@ services:
         timeout: 1s
         retries: 10
 
-  ui:
-    depends_on:
-      - haystack-api
-    build:
-      context: ui
-      dockerfile: Dockerfile
-    ports:
-      - 8501:8501
-    restart: on-failure
-    environment:
-      - API_ENDPOINT=http://haystack-api:8000
-      - EVAL_FILE=ui/eval_labels_example.csv
-      # The value of the following variables will be read from the host, if present.
-      # They can also be temporarily set for docker-compose, for example:
-      # DISABLE_FILE_UPLOAD=1 DEFAULT_DOCS_FROM_RETRIEVER=5 docker-compose up
-      - DISABLE_FILE_UPLOAD
-      - DEFAULT_QUESTION_AT_STARTUP
-      - DEFAULT_DOCS_FROM_RETRIEVER
-      - DEFAULT_NUMBER_OF_ANSWERS
+#  ui:
+#    depends_on:
+#      - haystack-api
+#    build:
+#      context: ui
+#      dockerfile: Dockerfile
+#    ports:
+#      - 8501:8501
+#    restart: on-failure
+#    environment:
+#      - API_ENDPOINT=http://haystack-api:8000
+#      - EVAL_FILE=ui/eval_labels_example.csv
+#      # The value of the following variables will be read from the host, if present.
+#      # They can also be temporarily set for docker-compose, for example:
+#      # DISABLE_FILE_UPLOAD=1 DEFAULT_DOCS_FROM_RETRIEVER=5 docker-compose up
+#      - DISABLE_FILE_UPLOAD
+#      - DEFAULT_QUESTION_AT_STARTUP
+#      - DEFAULT_DOCS_FROM_RETRIEVER
+#      - DEFAULT_NUMBER_OF_ANSWERS
