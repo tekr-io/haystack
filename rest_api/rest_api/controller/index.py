@@ -71,7 +71,7 @@ def upload_file(
             file.file.close()
 
     document_store = ElasticsearchDocumentStore(
-        similarity='cosine',
+        similarity='dot_product',
         embedding_dim=768,
         host=ELASTIC_HOST,
         port=9243,
@@ -86,7 +86,7 @@ def upload_file(
 
     embedding_retriever = EmbeddingRetriever(
         document_store=document_store,
-        embedding_model='sentence-transformers/multi-qa-mpnet-base-cos-v1',
+        embedding_model='sentence-transformers/multi-qa-mpnet-base-dot-v1',
         model_format='sentence_transformers'
     )
 
@@ -100,7 +100,7 @@ def upload_file(
         clean_whitespace=True,
         clean_header_footer=True,
         split_by='sentence',
-        split_length=100,
+        split_length=50,
         split_respect_sentence_boundary=False,
         split_overlap=0
     )
