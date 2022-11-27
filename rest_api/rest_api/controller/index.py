@@ -71,7 +71,6 @@ def upload_file(
 ):
     file_paths: list = []
     file_metas: list = []
-    workspace = file_metas[0]['workspace']
 
     meta_form = json.loads(meta) or {}  # type: ignore
     if not isinstance(meta_form, dict):
@@ -88,6 +87,8 @@ def upload_file(
             file_metas.append(meta_form)
         finally:
             file.file.close()
+
+    workspace = file_metas[0]['workspace']
 
     if workspace not in workspaces:
         workspaces.append(workspace)
