@@ -21,6 +21,24 @@ from rest_api.controller.utils import as_form
 router = APIRouter()
 app: FastAPI = get_app()
 
+workspaces = []
+document_store = {}
+embedding_retriever = {}
+
+file_type_classifier = FileTypeClassifier()
+text_converter = TextConverter()
+pdf_converter = PDFToTextConverter()
+md_converter = MarkdownConverter()
+
+preprocessor = PreProcessor(
+    clean_empty_lines=True,
+    clean_whitespace=True,
+    clean_header_footer=True,
+    split_by='sentence',
+    split_length=50,
+    split_respect_sentence_boundary=False,
+    split_overlap=0
+)
 
 @as_form
 class FileConverterParams(BaseModel):
@@ -53,6 +71,7 @@ def upload_file(
 ):
     file_paths: list = []
     file_metas: list = []
+    workspace = file_metas[0]['workspace']
 
     meta_form = json.loads(meta) or {}  # type: ignore
     if not isinstance(meta_form, dict):
@@ -70,40 +89,27 @@ def upload_file(
         finally:
             file.file.close()
 
-    document_store = ElasticsearchDocumentStore(
-        similarity='dot_product',
-        embedding_dim=768,
-        host=ELASTIC_HOST,
-        port=9243,
-        username='elastic',
-        password=ELASTIC_PASSWORD,
-        scheme='https',
-        ca_certs='/etc/ssl/certs/ca-certificates.crt',
-        verify_certs=True,
-        duplicate_documents='overwrite',
-        index=file_metas[0]['index']
-    )
+    if workspace not in workspaces:
+        workspaces.append(workspace)
+        document_store[workspace] = ElasticsearchDocumentStore(
+            similarity='dot_product',
+            embedding_dim=768,
+            host=ELASTIC_HOST,
+            port=9243,
+            username='elastic',
+            password=ELASTIC_PASSWORD,
+            scheme='https',
+            ca_certs='/etc/ssl/certs/ca-certificates.crt',
+            verify_certs=True,
+            duplicate_documents='overwrite',
+            index='search-document-' + workspace
+        )
 
-    embedding_retriever = EmbeddingRetriever(
-        document_store=document_store,
-        embedding_model='sentence-transformers/multi-qa-mpnet-base-dot-v1',
-        model_format='sentence_transformers'
-    )
-
-    file_type_classifier = FileTypeClassifier()
-    text_converter = TextConverter()
-    pdf_converter = PDFToTextConverter()
-    md_converter = MarkdownConverter()
-
-    preprocessor = PreProcessor(
-        clean_empty_lines=True,
-        clean_whitespace=True,
-        clean_header_footer=True,
-        split_by='sentence',
-        split_length=50,
-        split_respect_sentence_boundary=False,
-        split_overlap=0
-    )
+        embedding_retriever[workspace] = EmbeddingRetriever(
+            document_store=document_store[workspace],
+            embedding_model='sentence-transformers/multi-qa-mpnet-base-dot-v1',
+            model_format='sentence_transformers'
+        )
 
     p = Pipeline()
 
@@ -113,7 +119,7 @@ def upload_file(
     p.add_node(component=md_converter, name='MarkdownConverter', inputs=['FileTypeClassifier.output_3'])
     p.add_node(component=preprocessor, name='PreProcessor',
                inputs=['TextConverter', 'PDFToTextConverter', 'MarkdownConverter'])
-    p.add_node(component=embedding_retriever, name='EmbeddingRetriever', inputs=['PreProcessor'])
-    p.add_node(component=document_store, name='DocumentStore', inputs=['EmbeddingRetriever'])
+    p.add_node(component=embedding_retriever[workspace], name='EmbeddingRetriever', inputs=['PreProcessor'])
+    p.add_node(component=document_store[workspace], name='DocumentStore', inputs=['EmbeddingRetriever'])
 
     p.run(file_paths=file_paths, meta=file_metas)
