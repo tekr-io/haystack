@@ -109,7 +109,8 @@ def upload_file(
         embedding_retriever[workspace] = EmbeddingRetriever(
             document_store=document_store[workspace],
             embedding_model='sentence-transformers/multi-qa-mpnet-base-dot-v1',
-            model_format='sentence_transformers'
+            model_format='sentence_transformers',
+            batch_size=8
         )
 
     p = Pipeline()

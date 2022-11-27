@@ -40,23 +40,23 @@ def setup_pipelines() -> Dict[str, Any]:
     pipelines["concurrency_limiter"] = concurrency_limiter
 
     # Load indexing pipeline (if available)
-    try:
-        indexing_pipeline = Pipeline.load_from_yaml(
-            Path(config.PIPELINE_YAML_PATH), pipeline_name=config.INDEXING_PIPELINE_NAME
-        )
-        docstore = indexing_pipeline.get_document_store()
-        if isinstance(docstore, UNSUPPORTED_DOC_STORES):
-            indexing_pipeline = None
-            raise PipelineConfigError(
-                "Indexing pipelines with FAISSDocumentStore or InMemoryDocumentStore are not supported by the REST APIs."
-            )
-
-    except PipelineConfigError as e:
-        indexing_pipeline = None
-        logger.error("%s\nFile Upload API will not be available.", e.message)
-
-    finally:
-        pipelines["indexing_pipeline"] = indexing_pipeline
+    # try:
+    #     indexing_pipeline = Pipeline.load_from_yaml(
+    #         Path(config.PIPELINE_YAML_PATH), pipeline_name=config.INDEXING_PIPELINE_NAME
+    #     )
+    #     docstore = indexing_pipeline.get_document_store()
+    #     if isinstance(docstore, UNSUPPORTED_DOC_STORES):
+    #         indexing_pipeline = None
+    #         raise PipelineConfigError(
+    #             "Indexing pipelines with FAISSDocumentStore or InMemoryDocumentStore are not supported by the REST APIs."
+    #         )
+    #
+    # except PipelineConfigError as e:
+    #     indexing_pipeline = None
+    #     logger.error("%s\nFile Upload API will not be available.", e.message)
+    #
+    # finally:
+    #     pipelines["indexing_pipeline"] = indexing_pipeline
 
     # Create directory for uploaded files
     os.makedirs(config.FILE_UPLOAD_PATH, exist_ok=True)
