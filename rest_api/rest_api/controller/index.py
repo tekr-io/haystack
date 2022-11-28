@@ -62,7 +62,7 @@ class Response(BaseModel):
 
 
 @router.post("/index")
-def upload_file(
+def index(
         files: List[UploadFile] = File(...),
         # JSON serialized string
         meta: Optional[str] = Form("null"),  # type: ignore
