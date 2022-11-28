@@ -21,7 +21,7 @@ services:
       - ELASTIC_HOST=lukaz.es.us-central1.gcp.cloud.es.io
       - ELASTIC_PASSWORD=xMXJXnKHrWNjmcbzDpr0nweF
       - TOKENIZERS_PARALLELISM=false
-      - CONCURRENT_REQUEST_PER_WORKER=8
+      - CONCURRENT_REQUEST_PER_WORKER=4
     depends_on:
       elasticsearch:
         condition: service_healthy
