@@ -1,0 +1,82 @@
+# To allow your IDE to autocomplete and validate your YAML pipelines, name them as <name of your choice>.haystack-pipeline.yml
+
+version: ignore
+
+components:    # define all the building-blocks for Pipeline
+  - name: DocumentStore
+    type: ElasticsearchDocumentStore
+    params:
+      host: lukaz.es.us-central1.gcp.cloud.es.io
+      port: 9243
+      username: elastic
+      password: xMXJXnKHrWNjmcbzDpr0nweF
+      #      api_key: TJtRNqXYQzCP2vjhdrh7pA
+      #      api_key_id: QEgMuIIBPWdvGDaDNqWr
+      scheme: https
+      ca_certs: /etc/ssl/certs/ca-certificates.crt
+      verify_certs: true
+      duplicate_documents: overwrite
+      index: search-document
+      similarity: dot_product
+      embedding_dim: 768
+  - name: Retriever
+    type: EmbeddingRetriever
+    params:
+      document_store: DocumentStore    # params can reference other components defined in the YAML
+      embedding_model: sentence-transformers/multi-qa-mpnet-base-dot-v1
+      model_format: sentence_transformers
+      batch_size: 8
+  - name: AnswerGeneratorOpenAI       # custom-name for the component; helpful for visualization & debugging
+    type: OpenAIAnswerGenerator    # Haystack Class name for the component
+    params:
+      api_key: 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
+      max_tokens: 100
+      temperature: 0
+      model: text-davinci-002
+      stop_words: [endoftext]
+      frequency_penalty: 0
+      presence_penalty: 0
+  - name: TextFileConverter
+    type: TextConverter
+  - name: PDFFileConverter
+    type: PDFToTextConverter
+  - name: MarkdownFileConverter
+    type: MarkdownConverter
+  - name: DocxFileConverter
+    type: DocxToTextConverter
+  - name: Preprocessor
+    type: PreProcessor
+    params:
+      split_by: sentence
+      split_length: 50
+      split_respect_sentence_boundary: false
+      clean_whitespace: false
+      clean_empty_lines: false
+  - name: FileTypeClassifier
+    type: FileTypeClassifier
+
+pipelines:
+  - name: query
+    nodes:
+      - name: Retriever
+        inputs: [Query]
+      - name: AnswerGeneratorOpenAI
+        inputs: [Retriever]
+  - name: indexing
+    nodes:
+      - name: FileTypeClassifier
+        inputs: [File]
+      - name: TextFileConverter
+        inputs: [FileTypeClassifier.output_1]
+      - name: PDFFileConverter
+        inputs: [FileTypeClassifier.output_2]
+      - name: MarkdownFileConverter
+        inputs: [FileTypeClassifier.output_3]
+      - name: DocxFileConverter
+        inputs: [FileTypeClassifier.output_4]
+      - name: Preprocessor
+        inputs: [DocxFileConverter, MarkdownFileConverter, PDFFileConverter, TextFileConverter]
+      - name: Retriever
+        inputs: [Preprocessor]
+      - name: DocumentStore
+        inputs: [Retriever]
