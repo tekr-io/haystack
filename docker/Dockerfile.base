@@ -22,7 +22,7 @@ RUN curl -O https://dl.xpdfreader.com/xpdf-4.04.tar.gz && \
     rm -rf xpdf-4.04
 
 # Shallow clone Haystack repo, we'll install from the local sources
-RUN git clone --depth=1 --branch=${haystack_version} https://github.com/deepset-ai/haystack.git /opt/haystack
+RUN git clone --depth=1 --branch=${haystack_version} https://github.com/tekr-io/haystack.git /opt/haystack
 WORKDIR /opt/haystack
 
 # Use a virtualenv we can copy over the next build stage
